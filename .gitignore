@@ -1,0 +1,5 @@
+/public_html/z4/db.php
+/public_html/z5/db.php
+/public_html/storage/*
+!/public_html/storage/.htaccess
+
