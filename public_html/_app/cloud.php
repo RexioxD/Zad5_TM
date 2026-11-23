@@ -38,6 +38,14 @@ function cloud_name(string $name): string
     return $name;
 }
 
+function cloud_folder_name(string $name): string
+{
+    if (!preg_match('/^[\pL\pN _.-]{1,100}$/u', $name) || $name === '.' || $name === '..') {
+        throw new InvalidArgumentException('Podaj poprawną nazwę folderu.');
+    }
+    return $name;
+}
+
 function cloud_file(string $folder, string $name): string
 {
     $path = cloud_dir($folder) . '/' . cloud_name($name);
@@ -183,14 +191,41 @@ function cloud_page(): void
         }
         try {
             if ($operation === 'folder' && $folder === '') {
-                $newName = trim((string)($_POST['name'] ?? ''));
-                if (!preg_match('/^[\pL\pN _.-]{1,100}$/u', $newName) || $newName === '.' || $newName === '..') {
-                    throw new InvalidArgumentException('Podaj poprawną nazwę folderu.');
-                }
-                if (!mkdir(cloud_root() . '/' . $newName, 0750)) {
+                $newName = cloud_folder_name(trim((string)($_POST['name'] ?? '')));
+                if (file_exists(cloud_root() . '/' . $newName) ||
+                    !mkdir(cloud_root() . '/' . $newName, 0750)) {
                     throw new RuntimeException('Nie udało się utworzyć folderu.');
                 }
                 flash('Utworzono folder.');
+            } elseif ($operation === 'move') {
+                $name = cloud_name((string)($_POST['name'] ?? ''));
+                $source = cloud_file($folder, $name);
+                $targetFolder = (string)($_POST['target_dir'] ?? '');
+                if ($targetFolder === $folder) {
+                    throw new InvalidArgumentException('Wybierz inny folder.');
+                }
+                $destination = cloud_dir($targetFolder) . '/' . $name;
+                if (file_exists($destination) || !rename($source, $destination)) {
+                    throw new RuntimeException('Nie udało się dodać pliku do folderu. Sprawdź, czy nazwa nie jest zajęta.');
+                }
+                flash('Dodano plik do folderu.');
+            } elseif ($operation === 'rename') {
+                $name = cloud_name((string)($_POST['name'] ?? ''));
+                $source = $directory . '/' . $name;
+                $isFolder = $folder === '' && is_dir($source) && !is_link($source);
+                if (!$isFolder && (!is_file($source) || is_link($source))) {
+                    throw new InvalidArgumentException('Nie znaleziono pliku lub folderu.');
+                }
+                $newName = trim((string)($_POST['new_name'] ?? ''));
+                $newName = $isFolder ? cloud_folder_name($newName) : cloud_name($newName);
+                $destination = $directory . '/' . $newName;
+                if ($newName === $name) {
+                    throw new InvalidArgumentException('Podaj inną nazwę.');
+                }
+                if (file_exists($destination) || !rename($source, $destination)) {
+                    throw new RuntimeException('Nie udało się zmienić nazwy. Sprawdź, czy nazwa nie jest zajęta.');
+                }
+                flash('Zmieniono nazwę.');
             } elseif ($operation === 'upload') {
                 $file = $_FILES['file'] ?? null;
                 if (!$file || $file['error'] !== UPLOAD_ERR_OK) {
@@ -252,6 +287,13 @@ function cloud_page(): void
         '<input class="form-control" type="file" id="cloud-file" name="file" required>' .
         '<button class="btn btn-primary">Prześlij</button></div><div class="help" data-upload-status aria-live="polite"></div></form></div>';
 
+    $folders = [];
+    foreach (new DirectoryIterator(cloud_root()) as $entry) {
+        if (!$entry->isDot() && $entry->isDir() && !$entry->isLink()) {
+            $folders[] = $entry->getFilename();
+        }
+    }
+    natcasesort($folders);
     $items = [];
     foreach (new DirectoryIterator($directory) as $item) {
         if (!$item->isDot() && !$item->isLink() && strpos($item->getFilename(), '.upload-') !== 0) {
@@ -281,9 +323,39 @@ function cloud_page(): void
         echo '<div class="cloud-card-body"><a class="cloud-name" href="' .
             ($item['folder'] ? 'panel.php?dir=' . rawurlencode($name) : cloud_url($folder, $name, true)) . '">' .
             h($name) . '</a><div class="help">' . ($item['folder'] ? 'Folder' : number_format($item['size'] / 1024, 1, ',', ' ') . ' KB') .
-            '</div><form method="post">' . csrf() . '<input type="hidden" name="operation" value="delete">' .
+            '</div><div class="cloud-controls">';
+        if (!$item['folder']) {
+            $targets = array_values(array_filter($folders, fn($target) => $target !== $folder));
+            if ($folder !== '') {
+                array_unshift($targets, '');
+            }
+            if ($targets) {
+                echo '<details class="cloud-popover"><summary class="btn btn-sm btn-outline-primary">Dodaj do folderu</summary>' .
+                    '<form method="post" class="cloud-popover-content">' . csrf() .
+                    '<input type="hidden" name="operation" value="move">' .
+                    '<input type="hidden" name="dir" value="' . h($folder) . '">' .
+                    '<input type="hidden" name="name" value="' . h($name) . '">' .
+                    '<label for="move-' . h(md5($folder . '/' . $name)) . '">Wybierz folder</label>' .
+                    '<select class="form-select form-select-sm" id="move-' . h(md5($folder . '/' . $name)) . '" name="target_dir">';
+                foreach ($targets as $target) {
+                    echo '<option value="' . h($target) . '">' . h($target === '' ? 'Folder główny' : $target) . '</option>';
+                }
+                echo '</select><button class="btn btn-sm btn-primary">Dodaj</button></form></details>';
+            } else {
+                echo '<button class="btn btn-sm btn-outline-primary" disabled title="Utwórz najpierw folder">Dodaj do folderu</button>';
+            }
+        }
+        echo '<form method="post" class="cloud-delete">' . csrf() . '<input type="hidden" name="operation" value="delete">' .
             '<input type="hidden" name="dir" value="' . h($folder) . '"><input type="hidden" name="name" value="' . h($name) . '">' .
-            '<button class="btn btn-sm btn-outline-danger">Usuń</button></form></div></article>';
+            '<button class="btn btn-sm btn-outline-danger">Usuń</button></form>' .
+            '<details class="cloud-popover cloud-more"><summary class="btn btn-sm btn-outline-primary" aria-label="Więcej opcji dla ' . h($name) . '">⋮</summary>' .
+            '<form method="post" class="cloud-popover-content">' . csrf() .
+            '<input type="hidden" name="operation" value="rename">' .
+            '<input type="hidden" name="dir" value="' . h($folder) . '">' .
+            '<input type="hidden" name="name" value="' . h($name) . '">' .
+            '<label for="rename-' . h(md5($folder . '/' . $name)) . '">Zmień nazwę</label>' .
+            '<input class="form-control form-control-sm" id="rename-' . h(md5($folder . '/' . $name)) . '" name="new_name" value="' . h($name) . '" required>' .
+            '<button class="btn btn-sm btn-primary">Zapisz</button></form></details></div></div></article>';
     }
     echo '</div>';
     if (!$items) {
