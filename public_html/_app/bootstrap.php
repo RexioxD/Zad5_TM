@@ -112,7 +112,7 @@ function page_start(string $title, bool $navigation = true): void {
         return;
     }
     if ($boot) { echo '<link rel="stylesheet" href="../assets/bootstrap.min.css"><script defer src="../assets/bootstrap.bundle.min.js"></script>'; }
-    echo '<link rel="stylesheet" href="twoj_css.css?v=20261122"><script defer src="twoj_js.js"></script><script defer src="../assets/app.js?v=20261122"></script></head><body' . (isset($GLOBALS['visit_id']) ? ' data-visit="' . (int)$GLOBALS['visit_id'] . '" data-csrf="' . h($_SESSION['csrf']) . '"' : '') . '>';
+    echo '<link rel="stylesheet" href="twoj_css.css?v=20261122c"><script defer src="twoj_js.js"></script><script defer src="../assets/app.js?v=20261122c"></script></head><body' . (isset($GLOBALS['visit_id']) ? ' data-visit="' . (int)$GLOBALS['visit_id'] . '" data-csrf="' . h($_SESSION['csrf']) . '"' : '') . '>';
     if ($navigation && user()) {
         echo '<div id="myHeader">';
         navbar();

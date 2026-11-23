@@ -2,6 +2,75 @@
 // Funkcja myLoadHeader pochodzi z indywidualnego pliku twoj_js.js.
 document.addEventListener('DOMContentLoaded',()=>{
  myLoadHeader();
+ const uploadForm=document.querySelector('form[data-cloud-upload]');
+ if(uploadForm){uploadForm.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const file=uploadForm.querySelector('input[type=file]').files[0];
+  if(!file)return;
+  const status=uploadForm.querySelector('[data-upload-status]');
+  const button=uploadForm.querySelector('button');
+  const chunkSize=2*1024*1024;
+  const count=Math.ceil(file.size/chunkSize);
+  if(!file.size||file.size>512*1024*1024||count>256){status.textContent='Plik musi mieć od 1 B do 512 MB.';return}
+  const id=Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
+  button.disabled=true;
+  try{
+   for(let index=0;index<count;index++){
+    status.textContent='Przesyłanie: '+Math.round(index/count*100)+'%';
+    const data=new FormData();
+    data.set('csrf',uploadForm.querySelector('[name=csrf]').value);
+    data.set('operation','upload_chunk');
+    data.set('dir',uploadForm.querySelector('[name=dir]').value);
+    data.set('name',file.name);
+    data.set('upload_id',id);
+    data.set('index',String(index));
+    data.set('count',String(count));
+    data.set('total',String(file.size));
+    data.set('file',file.slice(index*chunkSize,(index+1)*chunkSize),file.name);
+    const response=await fetch('panel.php'+location.search,{method:'POST',body:data,credentials:'same-origin'});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.message||'Nie udało się przesłać pliku.');
+   }
+   status.textContent='Przesłano plik.';
+   location.reload();
+  }catch(error){status.textContent=error.message||'Nie udało się przesłać pliku.';button.disabled=false}
+ })}
+ const mediaForm=document.querySelector('form[data-media-upload]');
+ if(mediaForm){mediaForm.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const file=mediaForm.querySelector('input[type=file]').files[0];
+  if(!file)return;
+  const status=mediaForm.querySelector('[data-upload-status]');
+  const button=mediaForm.querySelector('button');
+  const chunkSize=2*1024*1024;
+  const count=Math.ceil(file.size/chunkSize);
+  if(!file.size||file.size>512*1024*1024||count>256){status.textContent='Plik musi mieć od 1 B do 512 MB.';return}
+  const id=Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
+  button.disabled=true;
+  try{
+   for(let index=0;index<count;index++){
+    status.textContent='Przesyłanie: '+Math.round(index/count*100)+'%';
+    const data=new FormData();
+    data.set('csrf',mediaForm.querySelector('[name=csrf]').value);
+    data.set('operation','upload_chunk');
+    data.set('name',file.name);
+    data.set('upload_id',id);
+    data.set('index',String(index));
+    data.set('count',String(count));
+    data.set('total',String(file.size));
+    data.set('title',mediaForm.querySelector('[name=title]').value);
+    data.set('creator',mediaForm.querySelector('[name=creator]').value);
+    data.set('type_id',mediaForm.querySelector('[name=type_id]').value);
+    data.set('description',mediaForm.querySelector('[name=description]').value);
+    data.set('media',file.slice(index*chunkSize,(index+1)*chunkSize),file.name);
+    const response=await fetch('upload.php',{method:'POST',body:data,credentials:'same-origin'});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.message||'Nie udało się przesłać pliku.');
+   }
+   status.textContent='Przesyłanie: 100%';
+   location.assign('panel.php');
+  }catch(error){status.textContent=error.message||'Nie udało się przesłać pliku.';button.disabled=false}
+ })}
  if(document.body.dataset.visit){const id=document.body.dataset.visit;const values={screen:screen.width+' × '+screen.height,window:innerWidth+' × '+innerHeight,colors:screen.colorDepth,cookies:navigator.cookieEnabled?'1':'0',java:typeof navigator.javaEnabled==='function'&&navigator.javaEnabled()?'1':'0',language:navigator.language};const p=new URLSearchParams({id,csrf:document.body.dataset.csrf,...values});fetch('client.php',{method:'POST',body:p}).then(response=>{if(!response.ok)return;const row=document.querySelector('tr[data-visit-id="'+id+'"]');if(!row)return;[values.screen,values.window,values.colors+' bit',values.cookies==='1'?'Tak':'Nie',values.java==='1'?'Tak':'Nie',values.language].forEach((value,index)=>row.cells[index+8].textContent=value)}).catch(()=>{});}
  document.querySelectorAll('table[data-table]').forEach(table=>{
   const headings=Array.from(table.tHead.rows[0].cells).map(cell=>cell.textContent.trim());

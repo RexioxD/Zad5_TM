@@ -228,6 +228,93 @@ function media_upload(): void
     go('panel.php');
 }
 
+function media_upload_chunk(): void
+{
+    header('Content-Type: application/json; charset=UTF-8');
+    try {
+        check_csrf();
+        $kind = media_kind();
+        $uploadId = (string)($_POST['upload_id'] ?? '');
+        $index = filter_var($_POST['index'] ?? null, FILTER_VALIDATE_INT);
+        $count = filter_var($_POST['count'] ?? null, FILTER_VALIDATE_INT);
+        $total = filter_var($_POST['total'] ?? null, FILTER_VALIDATE_INT);
+        $file = $_FILES['media'] ?? null;
+        if (!preg_match('/^[a-f0-9]{32}$/', $uploadId) || $index === false ||
+            $count === false || $total === false || $index < 0 || $count < 1 ||
+            $count > 256 || $index >= $count || $total < 1 ||
+            $total > 512 * 1024 * 1024 || !$file ||
+            $file['error'] !== UPLOAD_ERR_OK || $file['size'] < 1 ||
+            $file['size'] > 2 * 1024 * 1024 ||
+            strtolower(pathinfo((string)($_POST['name'] ?? ''), PATHINFO_EXTENSION)) !== $kind['file']) {
+            throw new InvalidArgumentException('Nieprawidłowa część pliku.');
+        }
+        $dir = dirname(__DIR__) . '/storage/media/' . APP_KEY . '/' . user()['id'];
+        if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
+            throw new RuntimeException('Nie udało się utworzyć katalogu.');
+        }
+        $partial = $dir . '/.upload-' . $uploadId . '.part';
+        $stream = fopen($partial, $index === 0 ? 'wb' : 'c+b');
+        if (!$stream || !flock($stream, LOCK_EX)) {
+            throw new RuntimeException('Nie udało się zapisać pliku.');
+        }
+        if ($index > 0 && filesize($partial) !== $index * 2 * 1024 * 1024) {
+            throw new RuntimeException('Części pliku dotarły w złej kolejności.');
+        }
+        fseek($stream, 0, SEEK_END);
+        $input = fopen($file['tmp_name'], 'rb');
+        $written = stream_copy_to_stream($input, $stream);
+        fclose($input);
+        fflush($stream);
+        clearstatcache(true, $partial);
+        $complete = $index === $count - 1;
+        if ($written !== $file['size'] || ($complete && filesize($partial) !== $total)) {
+            throw new RuntimeException('Plik został przesłany niekompletnie.');
+        }
+        flock($stream, LOCK_UN);
+        fclose($stream);
+        if ($complete) {
+            $title = trim((string)($_POST['title'] ?? ''));
+            $creator = trim((string)($_POST['creator'] ?? ''));
+            $description = trim((string)($_POST['description'] ?? ''));
+            $typeId = (int)($_POST['type_id'] ?? 0);
+            if ($title === '' || $creator === '' || mb_strlen($title) > 200 || mb_strlen($creator) > 200) {
+                throw new InvalidArgumentException('Wypełnij tytuł i wykonawcę.');
+            }
+            $detected = (new finfo(FILEINFO_MIME_TYPE))->file($partial);
+            if (!in_array($detected, APP_KEY === 'z6a' ? ['audio/mpeg', 'audio/mp3'] :
+                ['video/mp4', 'application/mp4'], true)) {
+                throw new InvalidArgumentException('Wybrany plik ma niewłaściwy format.');
+            }
+            $type = media_table($kind['type']);
+            if (!media_query("SELECT `{$kind['type_id']}` FROM `$type` WHERE `{$kind['type_id']}`=?",
+                'i', [$typeId])->get_result()->fetch_assoc()) {
+                throw new InvalidArgumentException('Wybierz gatunek z listy.');
+            }
+            $filename = bin2hex(random_bytes(16)) . '.' . $kind['file'];
+            $path = $dir . '/' . $filename;
+            if (!rename($partial, $path)) {
+                throw new RuntimeException('Nie udało się zapisać pliku.');
+            }
+            $table = media_table($kind['table']);
+            $creatorCol = $kind['creator'];
+            $textCol = $kind['text'];
+            $typeCol = $kind['type_id'];
+            try {
+                media_query("INSERT INTO `$table`(title,`$creatorCol`,idu,filename,`$textCol`,`$typeCol`)
+                    VALUES(?,?,?,?,?,?)", 'ssissi',
+                    [$title, $creator, user()['id'], $filename, $description, $typeId]);
+            } catch (Throwable $error) {
+                unlink($path);
+                throw $error;
+            }
+        }
+        echo json_encode(['ok' => true, 'complete' => $complete]);
+    } catch (Throwable $error) {
+        http_response_code(400);
+        echo json_encode(['ok' => false, 'message' => $error->getMessage()]);
+    }
+}
+
 function media_playlist_action(): void
 {
     check_csrf();
@@ -243,6 +330,23 @@ function media_playlist_action(): void
         media_query("INSERT INTO `$table`(idu,name,public) VALUES(?,?,?)", 'isi',
             [user()['id'], $name, !empty($_POST['public']) ? 1 : 0]);
         flash('Utworzono playlistę.');
+    } elseif ($operation === 'add_many') {
+        $playlistId = (int)($_POST['idpl'] ?? 0);
+        $selected = $_POST['item_ids'] ?? [];
+        $playlist = media_query("SELECT idpl FROM `$table` WHERE idpl=? AND idu=?", 'ii',
+            [$playlistId, user()['id']])->get_result()->fetch_assoc();
+        if (!$playlist || !is_array($selected) || !$selected || count($selected) > 200) {
+            throw new InvalidArgumentException('Wybierz playlistę i co najmniej jeden plik.');
+        }
+        foreach (array_unique(array_map('intval', $selected)) as $itemId) {
+            if ($itemId < 1 || !media_can_read($itemId)) {
+                throw new InvalidArgumentException('Nie można dodać wybranego pliku.');
+            }
+            media_query("INSERT IGNORE INTO `$members`(idpl,`$key`) VALUES(?,?)", 'ii',
+                [$playlistId, $itemId]);
+        }
+        flash('Dodano wybrane pliki do playlisty.');
+        go('play.php?id=' . $playlistId);
     } elseif (in_array($operation, ['add', 'remove'], true)) {
         $playlistId = (int)($_POST['idpl'] ?? 0);
         $itemId = (int)($_POST['item_id'] ?? 0);
@@ -271,7 +375,7 @@ function media_upload_form(): void
     $types = db()->query("SELECT * FROM `$type` ORDER BY `{$kind['type_id']}`")
         ->fetch_all(MYSQLI_ASSOC);
     page_start('Dodaj ' . ($kind['file'] === 'mp3' ? 'utwór' : 'film'));
-    echo '<form class="panel media-form" method="post" action="upload.php" enctype="multipart/form-data">' . csrf() .
+    echo '<form class="panel media-form" method="post" action="upload.php" enctype="multipart/form-data" data-media-upload>' . csrf() .
         '<label class="form-label" for="media-title">Tytuł</label><input class="form-control mb-3" id="media-title" name="title" required>' .
         '<label class="form-label" for="media-creator">' . $kind['creator_label'] . '</label>' .
         '<input class="form-control mb-3" id="media-creator" name="creator" required>' .
@@ -284,7 +388,7 @@ function media_upload_form(): void
         '<textarea class="form-control mb-3" id="media-description" name="description" rows="3"></textarea>' .
         '<label class="form-label" for="media-file">Plik ' . strtoupper($kind['file']) . '</label>' .
         '<input class="form-control mb-3" id="media-file" name="media" type="file" accept=".' . $kind['file'] . '" required>' .
-        '<button class="btn btn-primary">Prześlij</button></form>';
+        '<button class="btn btn-primary">Prześlij</button><div class="help mt-2" data-upload-status aria-live="polite"></div></form>';
     page_end();
 }
 
@@ -294,8 +398,10 @@ function media_library(): void
     $playlists = media_own_playlists();
     $items = media_items();
     page_start('Zadanie ' . substr(APP_KEY, 1));
-    echo '<div class="cloud-toolbar"><h2>' . $kind['title'] . '</h2>' .
-        '<a class="btn btn-primary" href="select.php">Dodaj ' . ($kind['file'] === 'mp3' ? 'utwór' : 'film') . '</a></div>';
+    echo '<div class="cloud-toolbar"><h2>' . $kind['title'] . '</h2><div class="d-flex flex-wrap gap-2">' .
+        '<a class="btn btn-outline-primary" href="playlist.php#nowa">Dodaj playlistę</a>' .
+        '<a class="btn btn-outline-primary" href="playlist.php?choose=1">Dodaj do playlisty</a>' .
+        '<a class="btn btn-primary" href="select.php">Dodaj ' . ($kind['file'] === 'mp3' ? 'utwór' : 'film') . '</a></div></div>';
     echo '<div class="media-grid">';
     foreach ($items as $item) {
         $id = (int)$item[$kind['id']];
@@ -305,14 +411,8 @@ function media_library(): void
             h($item['title']) . '</h3><p>' . h($item[$kind['creator']]) . ' · ' .
             h($item['genre']) . '</p><p class="help">' . h($item['datetime']) . '</p>';
         if ($playlists) {
-            echo '<form method="post" action="playlist.php">' . csrf() .
-                '<input type="hidden" name="operation" value="add">' .
-                '<input type="hidden" name="item_id" value="' . $id . '"><div class="input-group">' .
-                '<select class="form-select" name="idpl" aria-label="Wybierz playlistę">';
-            foreach ($playlists as $playlist) {
-                echo '<option value="' . (int)$playlist['idpl'] . '">' . h($playlist['name']) . '</option>';
-            }
-            echo '</select><button class="btn btn-outline-primary">Dodaj do playlisty</button></div></form>';
+            echo '<a class="btn btn-sm btn-outline-primary" href="playlist.php?choose=1&amp;item_id=' .
+                $id . '">Dodaj do playlisty</a>';
         }
         echo '</div></article>';
     }
@@ -334,7 +434,31 @@ function media_playlists(): void
         $owners[(int)$account['id']] = $account['username'];
     }
     page_start('Playlisty');
-    echo '<form class="panel media-form" method="post">' . csrf() .
+    if (isset($_GET['choose'])) {
+        $kind = media_kind();
+        $items = media_items();
+        $mine = media_own_playlists();
+        echo '<form class="panel media-form" method="post">' . csrf() .
+            '<input type="hidden" name="operation" value="add_many"><h2>Dodaj do playlisty</h2>';
+        if (!$mine || !$items) {
+            notice(!$mine ? 'Najpierw utwórz playlistę.' : 'Biblioteka jest pusta.');
+        } else {
+            echo '<label class="form-label" for="playlist-target">Playlista</label><select class="form-select mb-3" id="playlist-target" name="idpl">';
+            foreach ($mine as $playlist) {
+                echo '<option value="' . (int)$playlist['idpl'] . '">' . h($playlist['name']) . '</option>';
+            }
+            echo '</select><p>Wybierz ' . ($kind['file'] === 'mp3' ? 'utwory' : 'filmy') . ':</p>';
+            foreach ($items as $item) {
+                $id = (int)$item[$kind['id']];
+                echo '<label class="d-block mb-2"><input type="checkbox" name="item_ids[]" value="' . $id . '"' .
+                    ((int)($_GET['item_id'] ?? 0) === $id ? ' checked' : '') . '> ' .
+                    h($item['title']) . ' · ' . h($item[$kind['creator']]) . '</label>';
+            }
+            echo '<button class="btn btn-primary mt-2">Dodaj wybrane</button>';
+        }
+        echo '</form>';
+    }
+    echo '<form id="nowa" class="panel media-form" method="post">' . csrf() .
         '<input type="hidden" name="operation" value="create"><label class="form-label" for="playlist-name">Nowa playlista</label>' .
         '<input class="form-control mb-2" id="playlist-name" name="name" required>' .
         '<label class="form-label"><input type="checkbox" name="public" value="1"> Publiczna</label><br>' .
@@ -411,6 +535,10 @@ function media_page(): void
         }
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (ACTION === 'media_upload') {
+                if (($_POST['operation'] ?? '') === 'upload_chunk') {
+                    media_upload_chunk();
+                    return;
+                }
                 media_upload();
             } elseif (ACTION === 'media_playlist') {
                 media_playlist_action();

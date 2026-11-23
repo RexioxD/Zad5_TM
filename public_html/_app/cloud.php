@@ -129,6 +129,58 @@ function cloud_page(): void
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         check_csrf();
         $operation = (string)($_POST['operation'] ?? '');
+        if ($operation === 'upload_chunk') {
+            header('Content-Type: application/json; charset=UTF-8');
+            try {
+                $name = cloud_name((string)($_POST['name'] ?? ''));
+                $uploadId = (string)($_POST['upload_id'] ?? '');
+                $index = filter_var($_POST['index'] ?? null, FILTER_VALIDATE_INT);
+                $count = filter_var($_POST['count'] ?? null, FILTER_VALIDATE_INT);
+                $total = filter_var($_POST['total'] ?? null, FILTER_VALIDATE_INT);
+                $file = $_FILES['file'] ?? null;
+                if (!preg_match('/^[a-f0-9]{32}$/', $uploadId) || $index === false ||
+                    $count === false || $total === false || $index < 0 || $count < 1 ||
+                    $count > 256 || $index >= $count || $total < 1 ||
+                    $total > 512 * 1024 * 1024 || !$file ||
+                    $file['error'] !== UPLOAD_ERR_OK || $file['size'] < 1 ||
+                    $file['size'] > 2 * 1024 * 1024) {
+                    throw new InvalidArgumentException('Nieprawidłowa część pliku.');
+                }
+                $destination = $directory . '/' . $name;
+                $partial = $directory . '/.upload-' . $uploadId . '.part';
+                if (file_exists($destination)) {
+                    throw new RuntimeException('Plik o tej nazwie już istnieje.');
+                }
+                $stream = fopen($partial, $index === 0 ? 'wb' : 'c+b');
+                if (!$stream || !flock($stream, LOCK_EX)) {
+                    throw new RuntimeException('Nie udało się zapisać pliku.');
+                }
+                if ($index > 0 && filesize($partial) !== $index * 2 * 1024 * 1024) {
+                    throw new RuntimeException('Części pliku dotarły w złej kolejności.');
+                }
+                fseek($stream, 0, SEEK_END);
+                $input = fopen($file['tmp_name'], 'rb');
+                $written = stream_copy_to_stream($input, $stream);
+                fclose($input);
+                fflush($stream);
+                clearstatcache(true, $partial);
+                $complete = $index === $count - 1;
+                if ($written !== $file['size'] ||
+                    ($complete && filesize($partial) !== $total)) {
+                    throw new RuntimeException('Plik został przesłany niekompletnie.');
+                }
+                if ($complete && !rename($partial, $destination)) {
+                    throw new RuntimeException('Nie udało się zapisać pliku.');
+                }
+                flock($stream, LOCK_UN);
+                fclose($stream);
+                echo json_encode(['ok' => true, 'complete' => $complete]);
+            } catch (Throwable $error) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'message' => $error->getMessage()]);
+            }
+            return;
+        }
         try {
             if ($operation === 'folder' && $folder === '') {
                 $newName = trim((string)($_POST['name'] ?? ''));
@@ -194,15 +246,15 @@ function cloud_page(): void
             '<div class="input-group"><input class="form-control" id="folder-name" name="name" required>' .
             '<button class="btn btn-primary">Utwórz</button></div></form>';
     }
-    echo '<form method="post" enctype="multipart/form-data" class="panel cloud-action">' . csrf() .
+    echo '<form method="post" enctype="multipart/form-data" class="panel cloud-action" data-cloud-upload>' . csrf() .
         '<input type="hidden" name="operation" value="upload"><input type="hidden" name="dir" value="' . h($folder) . '">' .
         '<label class="form-label" for="cloud-file">Prześlij plik</label><div class="input-group">' .
         '<input class="form-control" type="file" id="cloud-file" name="file" required>' .
-        '<button class="btn btn-primary">Prześlij</button></div></form></div>';
+        '<button class="btn btn-primary">Prześlij</button></div><div class="help" data-upload-status aria-live="polite"></div></form></div>';
 
     $items = [];
     foreach (new DirectoryIterator($directory) as $item) {
-        if (!$item->isDot() && !$item->isLink()) {
+        if (!$item->isDot() && !$item->isLink() && strpos($item->getFilename(), '.upload-') !== 0) {
             $items[] = ['name' => $item->getFilename(), 'folder' => $item->isDir(),
                 'size' => $item->isFile() ? $item->getSize() : null];
         }
